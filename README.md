@@ -73,3 +73,4 @@ ImagePullBackOff: Ensure the images are pushed to Docker Hub and the image paths
 Application Not Accessible: Confirm the vote-client service is exposed using minikube service or an equivalent command for your cluster.
 
 Logs: View pod logs for debugging:
+kubectl logs <pod-name>
