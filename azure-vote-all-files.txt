@@ -1,0 +1,302 @@
+######################
+# Dockerfile for Server-Side Component (vote-server)
+######################
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy server script
+COPY server.py ./
+
+# Expose the port
+EXPOSE 5000
+
+# Run the server
+CMD ["python", "server.py"]
+
+######################
+# Dockerfile for Client-Side Component (vote-client)
+######################
+FROM node:18-slim
+
+WORKDIR /app
+
+# Copy client app source files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install
+
+COPY . .
+
+# Expose the port
+EXPOSE 3000
+
+# Run the client
+CMD ["npm", "start"]
+
+######################
+# Kubernetes Manifest (vote-app.yaml)
+######################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vote-server-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vote-server
+  template:
+    metadata:
+      labels:
+        app: vote-server
+    spec:
+      containers:
+      - name: vote-server
+        image: abtagir/vote-server:latest
+        ports:
+        - containerPort: 5000
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vote-client-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vote-client
+  template:
+    metadata:
+      labels:
+        app: vote-client
+    spec:
+      containers:
+      - name: vote-client
+        image: abtagir/vote-client:latest
+        ports:
+        - containerPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vote-server
+spec:
+  type: ClusterIP
+  selector:
+    app: vote-server
+  ports:
+  - protocol: TCP
+    port: 5000
+    targetPort: 5000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vote-client
+spec:
+  type: NodePort
+  selector:
+    app: vote-client
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3000
+    nodePort: 30001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:latest
+        ports:
+        - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+
+
+######################
+# docker images built
+######################
+docker build -t vote-server -f Dockerfile.server .
+docker build -t vote-client -f Dockerfile.client .
+docker tag vote-client:latest abtagir/vote-client:latest
+docker tag vote-server:latest abtagir/vote-server:latest
+docker login
+docker push abtagir/vote-client:latest
+docker push abtagir/vote-server:latest
+
+
+######################
+# requirements.txt
+######################
+Flask
+redis
+
+
+######################
+# server.py
+######################
+from flask import Flask, request, jsonify
+import redis
+
+app = Flask(__name__)
+redis_client = redis.StrictRedis(host='redis', port=6379, decode_responses=True)
+
+# Initialize the vote counts
+redis_client.setnx('dogs', 0)
+redis_client.setnx('cats', 0)
+
+@app.route('/vote', methods=['POST'])
+def vote():
+    data = request.json
+    if not data or 'vote' not in data:
+        return jsonify({'error': 'Invalid request'}), 400
+
+    vote = data['vote'].lower()
+    if vote not in ['dogs', 'cats']:
+        return jsonify({'error': 'Invalid vote'}), 400
+
+    redis_client.incr(vote)
+    return jsonify({'message': f'Vote for {vote} recorded'})
+
+@app.route('/results', methods=['GET'])
+def results():
+    return jsonify({
+        'dogs': int(redis_client.get('dogs')),
+        'cats': int(redis_client.get('cats'))
+    })
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
+
+######################
+# package.json
+######################
+{
+  "name": "vote-client",
+  "version": "1.0.0",
+  "description": "Simple client for voting app",
+  "main": "client.js",
+  "scripts": {
+    "start": "node client.js"
+  },
+  "dependencies": {
+    "axios": "^1.4.0",
+    "express": "^4.18.2"
+  }
+}
+
+
+######################
+# client.js
+######################
+const express = require('express');
+const axios = require('axios');
+
+const app = express();
+app.use(express.static('public'));
+app.use(express.json());
+
+const SERVER_URL = 'http://vote-server.default.svc.cluster.local:5000';
+
+app.post('/vote', async (req, res) => {
+  try {
+    const response = await axios.post(`${SERVER_URL}/vote`, req.body);
+    res.status(response.status).json(response.data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json(err.response?.data || { error: 'Internal server error' });
+  }
+});
+
+app.get('/results', async (req, res) => {
+  try {
+    const response = await axios.get(`${SERVER_URL}/results`);
+    res.status(response.status).json(response.data);
+  } catch (err) {
+    res.status(err.response?.status || 500).json(err.response?.data || { error: 'Internal server error' });
+  }
+});
+
+app.listen(3000, () => {
+  console.log('Client is running on port 3000');
+});
+
+
+######################
+# Create a public directory with index.html inside
+######################
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Vote App</title>
+</head>
+<body>
+  <h1>Vote for Dogs or Cats</h1>
+  <button onclick="vote('dogs')">Vote for Dogs</button>
+  <button onclick="vote('cats')">Vote for Cats</button>
+  <h2>Results</h2>
+  <div id="results"></div>
+
+  <script>
+    async function vote(option) {
+      await fetch('/vote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vote: option })
+      });
+      fetchResults();
+    }
+
+    async function fetchResults() {
+      const response = await fetch('/results');
+      const data = await response.json();
+      document.getElementById('results').innerHTML =
+        `Dogs: ${data.dogs}<br>Cats: ${data.cats}`;
+    }
+
+    fetchResults();
+  </script>
+</body>
+</html>
+
+
+######################
+# Deploy the application to your Minikube cluster
+######################
+kubectl apply -f vote-app.yaml
+
+check http://<minikube-ip>:30001
+
